@@ -70,6 +70,7 @@ opentelemetry = "0.21.0"
 tracing-opentelemetry = "0.22.0"
 opentelemetry-jaeger = { version = "0.20.0", features = ["rt-tokio"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "macros", "postgres", "migrate"] }
+serde = { workspace = true }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3

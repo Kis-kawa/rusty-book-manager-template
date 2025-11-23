@@ -18,10 +18,27 @@ export default function LoginPage(){
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
 
-    const handleLogin = () => {
-        console.log("入力されたメアド:", email);
-        console.log("入力されたパスワード:", password);
-        alert(`ログイン試行: ${email}`);
+    // ログインボタンを押した時の動き
+    const handleLogin = async () => {
+        try {
+        const response = await fetch("http://localhost:8000/login", {
+            method: "POST",
+            headers: {
+            "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ email: email }), // Rustの型に合わせてJSONを送る
+        });
+
+        if (response.ok) {
+            const text = await response.text();
+            alert(`成功！サーバーからの返事: ${text}`);
+        } else {
+            alert("エラーが発生しました");
+        }
+        } catch (error) {
+        console.error(error);
+        alert("サーバーに接続できません");
+        }
     };
 
     return(
@@ -57,7 +74,7 @@ export default function LoginPage(){
                 </div>
             </CardContent>
             <CardFooter className="flex-col gap-1">
-                <Button className="w-full"> Login </Button>
+                <Button className="w-full" onClick={handleLogin}> Login </Button>
             </CardFooter>
             </Card>
         </div>
