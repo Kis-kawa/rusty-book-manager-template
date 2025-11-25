@@ -12,6 +12,7 @@ import {
     CardHeader,
     CardTitle,
 } from "@/components/ui/card"
+import Link from "next/link";
 
 export default function LoginPage(){
     // [変数名, 値を変える関数（用意されてる）] = useState(初期値)
@@ -47,7 +48,9 @@ export default function LoginPage(){
             <CardHeader>
                 <CardTitle >産技往復便 ログイン</CardTitle>
                 <CardDescription>産業技術高等専門学校 品川キャンパスと荒川キャンパスをつなぐ往復便の予約システムにログイン</CardDescription>
-                <CardAction>Sing Up</CardAction>
+                <CardAction>
+                    <Link href="/signup">Sing Up</Link>
+                </CardAction>
             </CardHeader>
             <CardContent>
                 <div className="flex flex-col gap-5">
