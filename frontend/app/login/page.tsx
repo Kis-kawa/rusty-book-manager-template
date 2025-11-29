@@ -27,7 +27,7 @@ export default function LoginPage(){
             headers: {
             "Content-Type": "application/json",
             },
-            body: JSON.stringify({ email: email }), // Rustの型に合わせてJSONを送る
+            body: JSON.stringify({ email: email, password: password }), // Rustの型に合わせてJSONを送る
         });
 
         if (response.ok) {

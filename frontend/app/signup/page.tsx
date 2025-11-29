@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input  } from "@/components/ui/input";
 import {
@@ -15,13 +16,33 @@ import {
 import Link from "next/link";
 
 
-export default function SingUpPage(){
-
+export default function SignUpPage(){
+    const router = useRouter();
+    const [name, setName] = useState("");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
 
+
     const handleSignUp = async () => {
         try{
+            const response = await fetch("http://localhost:8000/register", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    name: name,
+                    email: email,
+                    password: password,
+                    role: "student"
+                })
+            })
+            if (response.ok) {
+                alert("登録しました！ログインしてください。");
+                router.push("/login"); // ログイン画面へ強制移動
+            } else {
+                alert("登録に失敗しました。メールアドレスが重複している可能性があります。");
+            }
         }catch(e){
             console.error(e);
         }
@@ -39,6 +60,16 @@ export default function SingUpPage(){
             </CardHeader>
             <CardContent>
                 <div className="flex flex-col gap-5">
+                    <div className="flex flex-col gap-1.5">
+                        <p className="text-xs text-gray-500">名前　例）高専　太郎</p>
+                        <Input
+                            type="text"
+                            placeholder="名前"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            required
+                        />
+                    </div>
                     <div className="flex flex-col gap-1.5">
                         <p className="text-xs text-gray-500">メールアドレス　例）m11111@g.metro-cit.ac.jp</p>
                         <Input

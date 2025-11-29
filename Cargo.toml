@@ -71,6 +71,8 @@ tracing-opentelemetry = "0.22.0"
 opentelemetry-jaeger = { version = "0.20.0", features = ["rt-tokio"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "macros", "postgres", "migrate"] }
 serde = { workspace = true }
+bcrypt = { workspace = true }
+dotenv = "0.15.0"
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3
