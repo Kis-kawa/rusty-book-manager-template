@@ -8,7 +8,7 @@ use axum::{
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{CorsLayer, Any};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use bcrypt::{hash, verify, DEFAULT_COST};
@@ -71,6 +71,12 @@ struct RegisterRequest {
     role: String,
 }
 
+#[derive(Serialize)]
+struct LoginResponse {
+    user_id: uuid::Uuid,
+    name: String,
+}
+
 // ----------------------------------------------------------------
 // ハンドラ関数 (Handlers)
 // ----------------------------------------------------------------
@@ -78,7 +84,7 @@ struct RegisterRequest {
 async fn login_handler(
     State(pool): State<PgPool>,
     Json(payload): Json<LoginRequest>
-) -> Result<String, StatusCode> {
+) -> Result<Json<LoginResponse>, StatusCode> {
     println!("【ログイン】リクエスト受信: {}", payload.email);
 
     // A. データベースからユーザーを探す
@@ -110,11 +116,15 @@ async fn login_handler(
 
     if is_valid {
         println!("✅ ログイン成功: {}", user.name);
-        // 本来はここで「セッショントークン」などを返しますが、今は成功メッセージだけでOK
-        Ok(format!("Login successful! Welcome, {} (ID: {})", user.name, user.user_id))
+
+        let response = LoginResponse {
+            user_id: user.user_id,
+            name: user.name,
+        };
+        Ok(Json(response))
     } else {
         println!("❌ パスワード不一致: {}", payload.email);
-        Err(StatusCode::UNAUTHORIZED) // 401 Unauthorized
+        Err(StatusCode::UNAUTHORIZED)
     }
 }
 

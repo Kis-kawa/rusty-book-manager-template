@@ -73,6 +73,7 @@ sqlx = { workspace = true, features = ["runtime-tokio", "uuid", "chrono", "macro
 serde = { workspace = true }
 bcrypt = { workspace = true }
 dotenv = "0.15.0"
+uuid = { workspace = true }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3

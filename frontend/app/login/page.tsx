@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input  } from "@/components/ui/input";
+import { useRouter } from "next/navigation";
 import {
     Card,
     CardAction,
@@ -18,8 +19,8 @@ export default function LoginPage(){
     // [変数名, 値を変える関数（用意されてる）] = useState(初期値)
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
+    const router = useRouter();
 
-    // ログインボタンを押した時の動き
     const handleLogin = async () => {
         try {
         const response = await fetch("http://localhost:8000/login", {
@@ -27,15 +28,21 @@ export default function LoginPage(){
             headers: {
             "Content-Type": "application/json",
             },
-            body: JSON.stringify({ email: email, password: password }), // Rustの型に合わせてJSONを送る
+            body: JSON.stringify({ email: email, password: password }),
         });
 
         if (response.ok) {
-            const text = await response.text();
-            alert(`成功！サーバーからの返事: ${text}`);
+            const data = await response.json();
+
+            // ブラウザの保存領域(localStorage)にユーザー情報をしまっておく
+            localStorage.setItem("currentUser", JSON.stringify(data));
+            alert(`ログインしました！ようこそ ${data.name} さん`);
+
+            // トップページ（予約画面）へ移動
+            router.push("/");
         } else {
-            alert("エラーが発生しました");
-        }
+            alert("メールアドレスかパスワードが間違っています");
+            }
         } catch (error) {
         console.error(error);
         alert("サーバーに接続できません");

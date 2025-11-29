@@ -1095,6 +1095,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "utoipa-redoc",
+ "uuid",
 ]
 
 [[package]]
