@@ -74,6 +74,7 @@ serde = { workspace = true }
 bcrypt = { workspace = true }
 dotenv = "0.15.0"
 uuid = { workspace = true }
+chrono = { version = "0.4.38", features = ["serde"] }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3

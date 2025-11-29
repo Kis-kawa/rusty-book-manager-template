@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use bcrypt::{hash, verify, DEFAULT_COST};
+use chrono::NaiveDateTime;
 
 #[tokio::main]
 async fn main() {
@@ -42,6 +43,7 @@ async fn main() {
         .route("/", get(|| async { "Hello from DB Connected Server!" }))
         .route("/login", post(login_handler))
         .route("/register", post(register_handler))
+        .route("/trips", get(get_all_trips))
         .layer(cors)
         .with_state(pool);
 
@@ -75,6 +77,17 @@ struct RegisterRequest {
 struct LoginResponse {
     user_id: uuid::Uuid,
     name: String,
+}
+
+#[derive(Serialize)]
+struct TripResponse {
+    trip_id: uuid::Uuid,
+    source: String,      // 出発地名
+    destination: String, // 到着地名
+    departure_time: NaiveDateTime, // 出発日時
+    arrival_time: NaiveDateTime,   // 到着日時
+    vehicle_name: String, // 車両名 (産技号1など)
+    status: String,       // 運行状況 (scheduled, delayed...)
 }
 
 // ----------------------------------------------------------------
@@ -164,4 +177,52 @@ async fn register_handler(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+
+async fn get_all_trips(
+    State(pool): State<PgPool>
+) -> Result<Json<Vec<TripResponse>>, StatusCode> {
+
+    // 複数のテーブルを結合(JOIN)して、必要な情報を一度に取ってくるSQL
+    // COALESCE(os.status::text, 'scheduled')
+    // → operational_statuses にレコードがあればそれを使い、なければ 'scheduled' (平常) とする
+    let rows = sqlx::query!(
+        r#"
+        SELECT
+            t.trip_id,
+            t.departure_datetime,
+            t.arrival_datetime,
+            s_stop.name as "source_name!",    -- !をつけると「NULLにならない」とRustに教えられる
+            d_stop.name as "dest_name!",
+            v.vehicle_name as "vehicle_name!",
+            COALESCE(os.status::text, 'scheduled') as "status!"
+        FROM trips t
+        JOIN routes r ON t.route_id = r.route_id
+        JOIN bus_stops s_stop ON r.source_bus_stop_id = s_stop.bus_stop_id
+        JOIN bus_stops d_stop ON r.destination_bus_stop_id = d_stop.bus_stop_id
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        LEFT JOIN operational_statuses os ON t.trip_id = os.trip_id
+        ORDER BY t.departure_datetime ASC
+        "#
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        println!("❌ DBエラー: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // DBから取れたデータを、レスポンス用の型に詰め替える
+    let trips = rows.into_iter().map(|row| TripResponse {
+        trip_id: row.trip_id,
+        source: row.source_name,
+        destination: row.dest_name,
+        departure_time: row.departure_datetime,
+        arrival_time: row.arrival_datetime,
+        vehicle_name: row.vehicle_name,
+        status: row.status,
+    }).collect();
+
+    Ok(Json(trips))
 }
