@@ -28,6 +28,40 @@ const router = useRouter();
 const [reservations, setReservations] = useState<Reservation[]>([]);
 const [isLoading, setIsLoading] = useState(true);
 
+
+// キャンセルボタンを押した時の処理
+const handleCancel = async (reservationId: string) => {
+    if (!confirm("本当にこの予約をキャンセルしますか？")) return;
+
+    // ログインユーザー情報の取得
+    const savedUser = localStorage.getItem("currentUser");
+    if (!savedUser) return;
+    const user = JSON.parse(savedUser);
+
+    try {
+    const res = await fetch("http://localhost:8000/reservations/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+        reservation_id: reservationId,
+        user_id: user.user_id,
+        }),
+    });
+
+    if (res.ok) {
+        alert("予約をキャンセルしました");
+        // 画面のリストから、今消した予約を除外して更新する（再読み込みしなくて済む）
+        setReservations((prev) => prev.filter((r) => r.reservation_id !== reservationId));
+    } else {
+        alert("キャンセルに失敗しました");
+    }
+    } catch (error) {
+    console.error(error);
+    alert("エラーが発生しました");
+    }
+};
+
+
 useEffect(() => {
     // ログインチェック
     const savedUser = localStorage.getItem("currentUser");
@@ -103,7 +137,14 @@ return (
                     <span>{res.vehicle_name}</span>
                     </div>
                 </div>
-                {/* ここにキャンセルボタンを追加予定 */}
+                <div className="flex items-end ml-auto">
+                    <Button
+                    variant="destructive"
+                    onClick={() => handleCancel(res.reservation_id)}
+                    >
+                    キャンセル
+                    </Button>
+                </div>
                 </CardContent>
             </Card>
             ))}

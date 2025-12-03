@@ -46,6 +46,7 @@ async fn main() {
         .route("/trips", get(get_all_trips))
         .route("/reservations", post(create_reservation))
         .route("/my-reservations", post(get_my_reservations))
+        .route("/reservations/cancel", post(cancel_reservation))
         .layer(cors)
         .with_state(pool);
 
@@ -109,6 +110,12 @@ struct MyReservationResponse {
     vehicle_name: String,
 }
 
+#[derive(Deserialize)]
+struct CancelReservationRequest {
+    reservation_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+}
+
 // ----------------------------------------------------------------
 // ハンドラ関数 (Handlers)
 // ----------------------------------------------------------------
@@ -129,7 +136,7 @@ async fn login_handler(
     .fetch_optional(&pool)
     .await
     .map_err(|e| {
-        println!("❌ DBエラー: {:?}", e);
+        println!("DBエラー: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -137,7 +144,7 @@ async fn login_handler(
     let user = match user {
         Some(u) => u,
         None => {
-            println!("❌ ユーザーが見つかりません: {}", payload.email);
+            println!("ユーザーが見つかりません: {}", payload.email);
             return Err(StatusCode::UNAUTHORIZED); // 401 Unauthorized
         }
     };
@@ -148,7 +155,7 @@ async fn login_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if is_valid {
-        println!("✅ ログイン成功: {}", user.name);
+        println!("ログイン成功: {}", user.name);
 
         let response = LoginResponse {
             user_id: user.user_id,
@@ -156,7 +163,7 @@ async fn login_handler(
         };
         Ok(Json(response))
     } else {
-        println!("❌ パスワード不一致: {}", payload.email);
+        println!("パスワード不一致: {}", payload.email);
         Err(StatusCode::UNAUTHORIZED)
     }
 }
@@ -231,7 +238,7 @@ async fn get_all_trips(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-        println!("❌ DBエラー: {:?}", e);
+        println!("DBエラー: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -295,7 +302,7 @@ async fn create_reservation(
 
     // 定員チェック
     if next_seat > capacity {
-        println!("❌ 満席です: 次の席 {}, 定員 {}", next_seat, capacity);
+        println!("満席です: 次の席 {}, 定員 {}", next_seat, capacity);
         return Err(StatusCode::UNPROCESSABLE_ENTITY);  // 422(Unprocessable Entity)
     }
 
@@ -315,11 +322,11 @@ async fn create_reservation(
 
     match result {
         Ok(_rec) => {
-            println!("✅ 予約完了! Seat: {} / Capacity: {}", next_seat, capacity);
+            println!("予約完了! Seat: {} / Capacity: {}", next_seat, capacity);
             Ok(format!("予約が完了しました！ {}人目 (定員: {}名)", next_seat, capacity))
         }
         Err(e) => {
-            println!("❌ 予約失敗: {:?}", e);
+            println!("予約失敗: {:?}", e);
             // エラーの種類をチェックする
             // PostgresのUnique Violationエラーコードは "23505"
             if let Some(db_error) = e.as_database_error() {
@@ -367,7 +374,7 @@ async fn get_my_reservations(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-        println!("❌ DBエラー: {:?}", e);
+        println!("DBエラー: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -382,4 +389,35 @@ async fn get_my_reservations(
     }).collect();
 
     Ok(Json(reservations))
+}
+
+// 予約キャンセル (POST /reservations/cancel)
+async fn cancel_reservation(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CancelReservationRequest>,
+) -> Result<String, StatusCode> {
+    println!("【キャンセル】Reservation: {}, User: {}", payload.reservation_id, payload.user_id);
+
+    // WHERE user_id = $2 をつけることで、「他人の予約」を勝手に消せない
+    let result = sqlx::query!(
+        "DELETE FROM reservations WHERE reservation_id = $1 AND user_id = $2",
+        payload.reservation_id,
+        payload.user_id
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| {
+        println!("DBエラー: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // 削除された行があるかチェック
+    if result.rows_affected() == 0 {
+        // 0行だった場合＝「予約IDが存在しない」か「ユーザーIDが一致しない（他人の予約）」
+        println!("キャンセル失敗（対象なし）");
+        return Err(StatusCode::NOT_FOUND); // 404 Not Found
+    }
+
+    println!("キャンセル成功");
+    Ok("予約をキャンセルしました".to_string())
 }
