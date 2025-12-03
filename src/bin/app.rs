@@ -44,6 +44,7 @@ async fn main() {
         .route("/login", post(login_handler))
         .route("/register", post(register_handler))
         .route("/trips", get(get_all_trips))
+        .route("/reservations", post(create_reservation))
         .layer(cors)
         .with_state(pool);
 
@@ -90,17 +91,24 @@ struct TripResponse {
     status: String,       // 運行状況 (scheduled, delayed...)
 }
 
+#[derive(Deserialize)]
+struct CreateReservationRequest {
+    trip_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+}
+
 // ----------------------------------------------------------------
 // ハンドラ関数 (Handlers)
 // ----------------------------------------------------------------
 
+// login
 async fn login_handler(
     State(pool): State<PgPool>,
     Json(payload): Json<LoginRequest>
 ) -> Result<Json<LoginResponse>, StatusCode> {
     println!("【ログイン】リクエスト受信: {}", payload.email);
 
-    // A. データベースからユーザーを探す
+    // データベースからユーザーを探す
     // fetch_optional は「見つかったら Some(user), 見つからなかったら None」を返します
     let user = sqlx::query!(
         "SELECT user_id, name, password FROM users WHERE email = $1",
@@ -113,7 +121,7 @@ async fn login_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // B. ユーザーが存在するかチェック
+    // ユーザーが存在するかチェック
     let user = match user {
         Some(u) => u,
         None => {
@@ -122,7 +130,7 @@ async fn login_handler(
         }
     };
 
-    // C. パスワードが合っているかチェック (verify)
+    // パスワードが合っているかチェック (verify)
     // payload.password (入力された平文) と user.password (DBのハッシュ) を比較
     let is_valid = verify(payload.password, &user.password)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -142,6 +150,7 @@ async fn login_handler(
 }
 
 
+//singup
 async fn register_handler(
     State(pool): State<PgPool>,
     Json(payload): Json<RegisterRequest>,
@@ -180,6 +189,7 @@ async fn register_handler(
 }
 
 
+// 運行便の一覧
 async fn get_all_trips(
     State(pool): State<PgPool>
 ) -> Result<Json<Vec<TripResponse>>, StatusCode> {
@@ -225,4 +235,87 @@ async fn get_all_trips(
     }).collect();
 
     Ok(Json(trips))
+}
+
+
+// 予約作成 (POST /reservations)
+async fn create_reservation(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateReservationRequest>,
+) -> Result<String, StatusCode> {
+    println!("【予約】Trip: {}, User: {}", payload.trip_id, payload.user_id);
+
+    // trips -> vehicles -> vehicle_types と辿って total_seats、車両の定員を取ってくる
+    let capacity = sqlx::query!(
+        r#"
+        SELECT vt.total_seats
+        FROM trips t
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        JOIN vehicle_types vt ON v.vehicle_type_id = vt.vehicle_type_id
+        WHERE t.trip_id = $1
+        "#,
+        payload.trip_id
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        println!("DBエラー(定員取得): {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .total_seats;
+
+    // 次の座席番号
+    let next_seat = sqlx::query!(
+        r#"
+        SELECT COALESCE(MAX(seat_number), 0) + 1 as "next_seat!"
+        FROM reservations
+        WHERE trip_id = $1
+        "#,
+        payload.trip_id
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| {
+        println!("DBエラー(座席計算): {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .next_seat;
+
+    // 定員チェック
+    if next_seat > capacity {
+        println!("❌ 満席です: 次の席 {}, 定員 {}", next_seat, capacity);
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);  // 422(Unprocessable Entity)
+    }
+
+    // 予約を保存
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO reservations (trip_id, user_id, seat_number)
+        VALUES ($1, $2, $3)
+        RETURNING reservation_id
+        "#,
+        payload.trip_id,
+        payload.user_id,
+        next_seat
+    )
+    .fetch_one(&pool)
+    .await;
+
+    match result {
+        Ok(_rec) => {
+            println!("✅ 予約完了! Seat: {} / Capacity: {}", next_seat, capacity);
+            Ok(format!("予約が完了しました！ {}人目 (定員: {}名)", next_seat, capacity))
+        }
+        Err(e) => {
+            println!("❌ 予約失敗: {:?}", e);
+            // エラーの種類をチェックする
+            // PostgresのUnique Violationエラーコードは "23505"
+            if let Some(db_error) = e.as_database_error() {
+                if db_error.code().as_deref() == Some("23505") {
+                     return Err(StatusCode::CONFLICT); // 409: すでに予約済み
+                }
+            }
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }

@@ -28,6 +28,46 @@ const formatDate = (dateString: string) => {
   });
 };
 
+// 予約ボタンを押した時の処理
+  const handleReserve = async (tripId: string) => {
+    // ログインチェック
+    const savedUser = localStorage.getItem("currentUser");
+    if (!savedUser) {
+      alert("予約するにはログインしてください");
+      return;
+    }
+    const user = JSON.parse(savedUser);
+
+    // 確認ダイアログ
+    if (!confirm("この便を予約しますか？")) return;
+
+    try {
+      const res = await fetch("http://localhost:8000/reservations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trip_id: tripId,
+          user_id: user.user_id,
+        }),
+      });
+
+      if (res.ok) {
+        const text = await res.text();
+        alert(text);
+      } else if (res.status === 422) {
+        alert("満席のため予約できませんでした");
+      } else if (res.status === 409) {
+        alert("すでにこの便を予約済みです");
+      } else {
+        alert("予約に失敗しました");
+      }
+    } catch (error) {
+      console.error(error);
+      alert("エラーが発生しました");
+    }
+  };
+
+
 export default function Home() {
   const [userName, setUserName] = useState<string | null>(null);
   const [trips, setTrips] = useState<Trip[]>([]); // 運行便のリスト
@@ -141,7 +181,10 @@ return (
                       <span className="font-bold ">{formatDate(trip.arrival_time)}</span>
                     </div>
 
-                    <Button className="w-full mt-4 bg-blue-600 hover:bg-blue-700">
+                    <Button
+                      className="w-full mt-4 bg-blue-600 hover:bg-blue-700"
+                      onClick={() => handleReserve(trip.trip_id)}
+                    >
                       予約する
                     </Button>
                   </div>
