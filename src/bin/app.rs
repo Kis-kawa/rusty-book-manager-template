@@ -45,6 +45,7 @@ async fn main() {
         .route("/register", post(register_handler))
         .route("/trips", get(get_all_trips))
         .route("/reservations", post(create_reservation))
+        .route("/my-reservations", post(get_my_reservations))
         .layer(cors)
         .with_state(pool);
 
@@ -95,6 +96,17 @@ struct TripResponse {
 struct CreateReservationRequest {
     trip_id: uuid::Uuid,
     user_id: uuid::Uuid,
+}
+
+#[derive(Serialize)]
+struct MyReservationResponse {
+    reservation_id: uuid::Uuid,
+    trip_id: uuid::Uuid,
+    seat_number: i32,
+    departure_time: NaiveDateTime,
+    source: String,
+    destination: String,
+    vehicle_name: String,
 }
 
 // ----------------------------------------------------------------
@@ -318,4 +330,56 @@ async fn create_reservation(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+// 自分の予約一覧取得 (POST /my-reservations)
+#[derive(Deserialize)]
+struct GetMyReservationsRequest {
+    user_id: uuid::Uuid,
+}
+
+async fn get_my_reservations(
+    State(pool): State<PgPool>,
+    Json(payload): Json<GetMyReservationsRequest>,
+) -> Result<Json<Vec<MyReservationResponse>>, StatusCode> {
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT
+            r.reservation_id,
+            r.seat_number,
+            t.trip_id,
+            t.departure_datetime,
+            s_stop.name as "source_name!",
+            d_stop.name as "dest_name!",
+            v.vehicle_name as "vehicle_name!"
+        FROM reservations r
+        JOIN trips t ON r.trip_id = t.trip_id
+        JOIN routes rt ON t.route_id = rt.route_id
+        JOIN bus_stops s_stop ON rt.source_bus_stop_id = s_stop.bus_stop_id
+        JOIN bus_stops d_stop ON rt.destination_bus_stop_id = d_stop.bus_stop_id
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        WHERE r.user_id = $1
+        ORDER BY t.departure_datetime DESC
+        "#,
+        payload.user_id
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        println!("❌ DBエラー: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let reservations = rows.into_iter().map(|row| MyReservationResponse {
+        reservation_id: row.reservation_id,
+        trip_id: row.trip_id,
+        seat_number: row.seat_number,
+        departure_time: row.departure_datetime,
+        source: row.source_name,
+        destination: row.dest_name,
+        vehicle_name: row.vehicle_name,
+    }).collect();
+
+    Ok(Json(reservations))
 }

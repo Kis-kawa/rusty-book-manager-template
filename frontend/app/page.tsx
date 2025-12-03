@@ -124,6 +124,9 @@ return (
             {userName ? (
               <>
                 <span className="font-bold">{userName} さん</span>
+                <Button variant="secondary" asChild className="mr-2">
+                  <Link href="/mypage">予約確認</Link>
+                </Button>
                 <Button variant="outline" onClick={() => {
                   localStorage.removeItem("currentUser");
                   window.location.reload();
