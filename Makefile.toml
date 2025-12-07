@@ -12,6 +12,7 @@ DATABASE_PORT_INNER = 5432
 REDIS_PORT_OUTER = 6379
 REDIS_PORT_INNER = 6379
 AUTH_TOKEN_TTL = 86400
+TEAMS_WEBHOOK_URL="https://defaulta2c3e6fca9594d2fb3744593a068ff.9c.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/bb1fe7c3c2f24d4e83b51debe2b38708/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=XWJIFL_nz5mwHIx1Q71ejmGoHT0pvKAr8-bsO6wJ-nE"
 
 # Docker Composeのネットワーク内でのDB等への接続情報
 [tasks.set-env-docker.env]

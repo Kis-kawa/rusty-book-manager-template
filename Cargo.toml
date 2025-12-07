@@ -75,6 +75,8 @@ bcrypt = { workspace = true }
 dotenv = "0.15.0"
 uuid = { workspace = true }
 chrono = { version = "0.4.38", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1.0"
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3

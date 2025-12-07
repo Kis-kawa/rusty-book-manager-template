@@ -47,6 +47,7 @@ async fn main() {
         .route("/reservations", post(create_reservation))
         .route("/my-reservations", post(get_my_reservations))
         .route("/reservations/cancel", post(cancel_reservation))
+        .route("/admin/status", post(insert_status))
         .layer(cors)
         .with_state(pool);
 
@@ -80,6 +81,7 @@ struct RegisterRequest {
 struct LoginResponse {
     user_id: uuid::Uuid,
     name: String,
+    role: String,
 }
 
 #[derive(Serialize)]
@@ -116,6 +118,13 @@ struct CancelReservationRequest {
     user_id: uuid::Uuid,
 }
 
+#[derive(Deserialize)]
+struct InsertStatusRequest {
+    user_id: uuid::Uuid,     // 権限チェック
+    trip_id: uuid::Uuid,
+    status: String, // "delayed", "cancelled"
+    description: Option<String>,
+}
 // ----------------------------------------------------------------
 // ハンドラ関数 (Handlers)
 // ----------------------------------------------------------------
@@ -130,7 +139,11 @@ async fn login_handler(
     // データベースからユーザーを探す
     // fetch_optional は「見つかったら Some(user), 見つからなかったら None」を返します
     let user = sqlx::query!(
-        "SELECT user_id, name, password FROM users WHERE email = $1",
+        r#"
+        SELECT user_id, name, password, role as "role!: String"
+        FROM users
+        WHERE email = $1
+        "#,
         payload.email
     )
     .fetch_optional(&pool)
@@ -160,6 +173,7 @@ async fn login_handler(
         let response = LoginResponse {
             user_id: user.user_id,
             name: user.name,
+            role: user.role,
         };
         Ok(Json(response))
     } else {
@@ -420,4 +434,214 @@ async fn cancel_reservation(
 
     println!("キャンセル成功");
     Ok("予約をキャンセルしました".to_string())
+}
+
+
+
+// 運行状況の登録・更新 (POST /admin/status)
+async fn insert_status(
+    State(pool): State<PgPool>,
+    Json(payload): Json<InsertStatusRequest>,
+) -> Result<String, StatusCode> {
+    println!("【管理者】運行状況変更: User={}, Trip={}, Status={}", payload.user_id, payload.trip_id, payload.status);
+
+    // 1. 権限チェック (Adminかどうか)
+    let user = sqlx::query!(
+        "SELECT role as \"role!: String\" FROM users WHERE user_id = $1",
+        payload.user_id
+    )
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match user {
+        Some(u) if u.role == "admin" => {}, // OK
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    // 2. ステータスによって処理を分岐！
+    match payload.status.as_str() {
+        // ★平常 (scheduled) の場合 -> レコードを削除する（＝平常に戻す）
+        "scheduled" => {
+            let result = sqlx::query!(
+                "DELETE FROM operational_statuses WHERE trip_id = $1",
+                payload.trip_id
+            )
+            .execute(&pool)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    println!("✅ 平常運転に戻しました（レコード削除）");
+                    return Ok("運行状況を '通常' に戻しました".to_string());
+                }
+                Err(e) => {
+                    println!("❌ DBエラー: {:?}", e);
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+        },
+
+        // ★遅延 (delayed) または 運休 (cancelled) の場合 -> レコードを保存・更新する
+        "delayed" | "cancelled" => {
+            let result = sqlx::query!(
+                r#"
+                INSERT INTO operational_statuses (trip_id, status, description)
+                VALUES ($1, $2::text::trip_status, $3)
+                ON CONFLICT (trip_id)
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    description = EXCLUDED.description,
+                    updated_at = NOW()
+                "#,
+                payload.trip_id,
+                payload.status,
+                payload.description
+            )
+            .execute(&pool)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    println!("✅ 状況更新成功: {}", payload.status);
+                    send_teams_notification(&pool, payload.trip_id, &payload.status, &payload.description).await;
+                    Ok(format!("運行状況を '{}' に変更しました", payload.status))
+                }
+                Err(e) => {
+                    println!("❌ DBエラー: {:?}", e);
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        },
+
+        // それ以外（変な文字）
+        _ => return Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+
+
+// Teams通知機能
+async fn send_teams_notification(
+    pool: &PgPool,
+    trip_id: uuid::Uuid,
+    status: &str,
+    description: &Option<String>,
+) {
+    // 1. 環境変数からURLを取得
+    let webhook_url = match std::env::var("TEAMS_WEBHOOK_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("⚠️ TEAMS_WEBHOOK_URLが設定されていないため通知をスキップします");
+            return;
+        }
+    };
+
+    // 2. その便を予約しているユーザー(メールと名前)を取得
+    struct UserInfo { name: String, email: String }
+    let users = sqlx::query_as!(
+        UserInfo,
+        r#"
+        SELECT u.name, u.email
+        FROM reservations r
+        JOIN users u ON r.user_id = u.user_id
+        WHERE r.trip_id = $1
+        "#,
+        trip_id
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default(); // エラーなら空リスト
+
+    if users.is_empty() {
+        println!("ℹ️ 予約者がいないため通知しません");
+        return;
+    }
+
+    // 3. メンション用のデータを作る
+    // Teamsのメンションには "<at>名前</at>" というテキストと、
+    // それに対応する "mentioned": { "id": "email", ... } というデータが必要です。
+
+    let mut mention_text_parts = Vec::new();
+    let mut mention_entities = Vec::new();
+
+    for user in users {
+        // テキスト部分: <at>高専太郎</at>
+        let text_tag = format!("<at>{}</at>", user.name);
+        mention_text_parts.push(text_tag.clone());
+
+        // データ部分
+        mention_entities.push(serde_json::json!({
+            "type": "mention",
+            "text": text_tag,
+            "mentioned": {
+                "id": user.email, // ここがTeamsの登録メアドと一致していれば通知が飛ぶ
+                "name": user.name
+            }
+        }));
+    }
+
+    let all_mentions_str = mention_text_parts.join(" ");
+    let status_msg = match status {
+        "delayed" => "⚠️ 【遅延情報】",
+        "cancelled" => "kB 【運休情報】", // kBは赤いアイコンっぽいやつ
+        _ => "【運行情報】"
+    };
+    let desc_str = description.clone().unwrap_or("詳細は管理画面を確認してください".to_string());
+
+    // 4. Adaptive Card の JSON を組み立てる
+    let payload = serde_json::json!({
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "type": "AdaptiveCard",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "size": "Medium",
+                            "weight": "Bolder",
+                            "text": format!("{} 産技往復便のお知らせ", status_msg),
+                            "color": if status == "cancelled" { "Attention" } else { "Warning" }
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": format!("以下の便の運行状況が **{}** に変更されました。", status.to_uppercase()),
+                            "wrap": true
+                        },
+                        {
+                            "type": "FactSet",
+                            "facts": [
+                                { "title": "詳細:", "value": desc_str }
+                            ]
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "対象者への通知:",
+                            "weight": "Bolder",
+                            "spacing": "Medium"
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": all_mentions_str, // ここに <at>...が入る
+                            "wrap": true
+                        }
+                    ],
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "version": "1.2",
+                    "msteams": {
+                        "entities": mention_entities // ここに実データが入る
+                    }
+                }
+            }
+        ]
+    });
+
+    // 5. 送信
+    let client = reqwest::Client::new();
+    match client.post(&webhook_url).json(&payload).send().await {
+        Ok(_) => println!("✅ Teams通知送信成功"),
+        Err(e) => println!("❌ Teams通知送信失敗: {:?}", e),
+    }
 }
