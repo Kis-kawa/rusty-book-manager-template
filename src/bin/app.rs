@@ -48,6 +48,8 @@ async fn main() {
         .route("/my-reservations", post(get_my_reservations))
         .route("/reservations/cancel", post(cancel_reservation))
         .route("/admin/status", post(insert_status))
+        .route("/admin/options", post(get_admin_options)) // 権限チェックのためPOSTにします
+        .route("/admin/trips", post(create_trip))
         .layer(cors)
         .with_state(pool);
 
@@ -125,6 +127,38 @@ struct InsertStatusRequest {
     status: String, // "delayed", "cancelled"
     description: Option<String>,
 }
+
+// 管理者用：マスターデータ取得 (GET /admin/options) 用
+#[derive(Serialize)]
+struct RouteOption {
+    route_id: uuid::Uuid,
+    name: String, // "品川 -> 荒川"
+}
+
+#[derive(Serialize)]
+struct SimpleOption {
+    id: uuid::Uuid,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct AdminOptionsResponse {
+    routes: Vec<RouteOption>,
+    vehicles: Vec<SimpleOption>,
+    drivers: Vec<SimpleOption>,
+}
+
+// 管理者用：便作成 (POST /admin/trips) 用
+#[derive(Deserialize)]
+struct CreateTripRequest {
+    user_id: uuid::Uuid, // 権限チェック用
+    route_id: uuid::Uuid,
+    vehicle_id: uuid::Uuid,
+    driver_id: uuid::Uuid,
+    departure_datetime: NaiveDateTime,
+    arrival_datetime: NaiveDateTime,
+}
+
 // ----------------------------------------------------------------
 // ハンドラ関数 (Handlers)
 // ----------------------------------------------------------------
@@ -683,5 +717,111 @@ async fn send_teams_notification(
     match client.post(&webhook_url).json(&payload).send().await {
         Ok(_) => println!("Teams通知送信成功"),
         Err(e) => println!("Teams通知送信失敗: {:?}", e),
+    }
+}
+
+
+// マスタデータ一括取得 (POST /admin/options)
+#[derive(Deserialize)]
+struct AdminAuthRequest {
+    user_id: uuid::Uuid,
+}
+
+async fn get_admin_options(
+    State(pool): State<PgPool>,
+    Json(payload): Json<AdminAuthRequest>,
+) -> Result<Json<AdminOptionsResponse>, StatusCode> {
+    // 権限チェック
+    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
+        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // roleが取れない、またはadminでない場合はエラー
+    match user {
+        Some(u) if u.role == "admin" => {},
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    // ルート一覧取得 (品川->荒川 のように名前を結合)
+    let routes = sqlx::query!(
+        r#"
+        SELECT
+            r.route_id,
+            s.name as "source!",
+            d.name as "dest!"
+        FROM routes r
+        JOIN bus_stops s ON r.source_bus_stop_id = s.bus_stop_id
+        JOIN bus_stops d ON r.destination_bus_stop_id = d.bus_stop_id
+        "#
+    )
+    .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // 車両一覧取得
+    let vehicles = sqlx::query!("SELECT vehicle_id, vehicle_name FROM vehicles")
+        .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // 運転手一覧取得
+    let drivers = sqlx::query!("SELECT driver_id, name FROM drivers")
+        .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // レスポンス作成
+    Ok(Json(AdminOptionsResponse {
+        routes: routes.into_iter().map(|r| RouteOption {
+            route_id: r.route_id,
+            name: format!("{} → {}", r.source, r.dest),
+        }).collect(),
+        vehicles: vehicles.into_iter().map(|v| SimpleOption {
+            id: v.vehicle_id,
+            name: v.vehicle_name,
+        }).collect(),
+        drivers: drivers.into_iter().map(|d| SimpleOption {
+            id: d.driver_id,
+            name: d.name,
+        }).collect(),
+    }))
+}
+
+
+// 便の新規作成 (POST /admin/trips)
+async fn create_trip(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateTripRequest>,
+) -> Result<String, StatusCode> {
+    println!("【管理者】新規便作成リクエスト");
+
+    // 権限チェック
+    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
+        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match user {
+        Some(u) if u.role == "admin" => {},
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    // tripsテーブルにINSERT
+    // trip_date は departure_datetime の日付部分を自動で採用します
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO trips (route_id, vehicle_id, driver_id, trip_date, departure_datetime, arrival_datetime)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+        payload.route_id,
+        payload.vehicle_id,
+        payload.driver_id,
+        payload.departure_datetime.date(), // $4: 日付だけを取り出して渡す (NaiveDate)
+        payload.departure_datetime,        // $5: 日時そのまま (NaiveDateTime)
+        payload.arrival_datetime           // $6: 日時そのまま
+    )
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            println!("便作成成功");
+            Ok("新しい便を作成しました".to_string())
+        }
+        Err(e) => {
+            println!("DBエラー: {:?}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }

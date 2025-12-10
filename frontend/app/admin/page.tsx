@@ -8,6 +8,23 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import Link from "next/link";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
 
 // 型定義
 type Trip = {
@@ -32,7 +49,6 @@ const [trips, setTrips] = useState<Trip[]>([]);
 const [user, setUser] = useState<any>(null);
 
 const loadData = async () => {
-    // ... (ここは以前と同じログインチェック＆データ取得処理) ...
     const savedUser = localStorage.getItem("currentUser");
     if (!savedUser) {
     router.push("/login");
@@ -54,13 +70,16 @@ const loadData = async () => {
 
 useEffect(() => { loadData(); }, [router]);
 
-// ★更新後にリストを再読み込みする関数を子コンポーネントに渡す
+// 更新後にリストを再読み込みする関数を子コンポーネントに渡す
 const handleReload = () => loadData();
 
 return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
     <div className="flex justify-between items-center mb-8">
+        <div className="flex items-center gap-4">
         <h1 className="text-3xl font-bold text-red-500">運行管理システム (Admin)</h1>
+        <AddTripDialog user={user} onCreated={loadData} />
+        </div>
         <Button variant="secondary" asChild><Link href="/">利用者画面へ戻る</Link></Button>
     </div>
 
@@ -190,5 +209,168 @@ return (
         )}
     </CardContent>
     </Card>
+);
+}
+
+
+// ----------------------------------------------------------------
+// 新規便追加ダイアログ
+// ----------------------------------------------------------------
+function AddTripDialog({ user, onCreated }: { user: any, onCreated: () => void }) {
+const [isOpen, setIsOpen] = useState(false);
+const [options, setOptions] = useState<any>(null); // ルートや車両の選択肢
+
+// フォームの状態
+const [routeId, setRouteId] = useState("");
+const [vehicleId, setVehicleId] = useState("");
+const [driverId, setDriverId] = useState("");
+const [departureTime, setDepartureTime] = useState("");
+const [arrivalTime, setArrivalTime] = useState("");
+
+// ダイアログが開いた時に選択肢データを取得
+useEffect(() => {
+    if (isOpen && user) {
+    fetch("http://localhost:8000/admin/options", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: user.user_id }),
+    })
+        .then((res) => res.json())
+        .then((data) => setOptions(data))
+        .catch((e) => console.error(e));
+    }
+}, [isOpen, user]);
+
+const handleSubmit = async () => {
+    if (!routeId || !vehicleId || !driverId || !departureTime || !arrivalTime) {
+    alert("すべての項目を入力してください");
+    return;
+    }
+
+    try {
+    const res = await fetch("http://localhost:8000/admin/trips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+        user_id: user.user_id,
+        route_id: routeId,
+        vehicle_id: vehicleId,
+        driver_id: driverId,
+        departure_datetime: departureTime + ":00",
+        arrival_datetime: arrivalTime + ":00",
+        }),
+    });
+
+    if (res.ok) {
+        alert("便を作成しました！");
+        setIsOpen(false);
+        // フォームリセット
+        setRouteId("");
+        setVehicleId("");
+        setDriverId("");
+        setDepartureTime("");
+        setArrivalTime("");
+        onCreated(); // リスト更新
+    } else {
+        alert("作成エラー");
+    }
+    } catch (e) {
+    console.error(e);
+    alert("通信エラー");
+    }
+};
+
+return (
+    <Dialog open={isOpen} onOpenChange={setIsOpen}>
+    <DialogTrigger asChild>
+        <Button className="bg-blue-600 hover:bg-blue-500">＋ 新規便追加</Button>
+    </DialogTrigger>
+    <DialogContent className="bg-gray-800 text-white border-gray-700">
+        <DialogHeader>
+        <DialogTitle>新しい運行便を登録</DialogTitle>
+        <DialogDescription>
+            ルート、車両、日時を指定してスケジュールを追加します。
+        </DialogDescription>
+        </DialogHeader>
+
+        {!options ? (
+        <p>データを読み込み中...</p>
+        ) : (
+        <div className="grid gap-4 py-4">
+            {/* ルート選択 */}
+            <div className="grid gap-2">
+            <Label>ルート</Label>
+            <Select onValueChange={setRouteId} value={routeId}>
+                <SelectTrigger className="bg-gray-700 border-gray-600">
+                <SelectValue placeholder="ルートを選択" />
+                </SelectTrigger>
+                <SelectContent>
+                {options.routes.map((r: any) => (
+                    <SelectItem key={r.route_id} value={r.route_id}>{r.name}</SelectItem>
+                ))}
+                </SelectContent>
+            </Select>
+            </div>
+
+            {/* 車両選択 */}
+            <div className="grid gap-2">
+            <Label>車両</Label>
+            <Select onValueChange={setVehicleId} value={vehicleId}>
+                <SelectTrigger className="bg-gray-700 border-gray-600">
+                <SelectValue placeholder="車両を選択" />
+                </SelectTrigger>
+                <SelectContent>
+                {options.vehicles.map((v: any) => (
+                    <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>
+                ))}
+                </SelectContent>
+            </Select>
+            </div>
+
+            {/* 運転手選択 */}
+            <div className="grid gap-2">
+            <Label>運転手</Label>
+            <Select onValueChange={setDriverId} value={driverId}>
+                <SelectTrigger className="bg-gray-700 border-gray-600">
+                <SelectValue placeholder="運転手を選択" />
+                </SelectTrigger>
+                <SelectContent>
+                {options.drivers.map((d: any) => (
+                    <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
+                ))}
+                </SelectContent>
+            </Select>
+            </div>
+
+            {/* 日時選択 */}
+            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-2">
+                <Label>出発日時</Label>
+                <Input
+                type="datetime-local"
+                className="bg-gray-700 border-gray-600 text-white"
+                value={departureTime}
+                onChange={(e) => setDepartureTime(e.target.value)}
+                />
+            </div>
+            <div className="grid gap-2">
+                <Label>到着日時</Label>
+                <Input
+                type="datetime-local"
+                className="bg-gray-700 border-gray-600 text-white"
+                value={arrivalTime}
+                onChange={(e) => setArrivalTime(e.target.value)}
+                />
+            </div>
+            </div>
+        </div>
+        )}
+
+        <DialogFooter>
+        <Button variant="secondary" onClick={() => setIsOpen(false)}>キャンセル</Button>
+        <Button className="bg-blue-600 hover:bg-blue-500" onClick={handleSubmit}>登録する</Button>
+        </DialogFooter>
+    </DialogContent>
+    </Dialog>
 );
 }
