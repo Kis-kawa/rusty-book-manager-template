@@ -7,12 +7,13 @@ use axum::{
 };
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tokio::time::{self, Duration};
 use tower_http::cors::{CorsLayer, Any};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::NaiveDateTime;
+use chrono::{Local, NaiveDateTime};
 
 #[tokio::main]
 async fn main() {
@@ -51,7 +52,12 @@ async fn main() {
         .route("/admin/options", post(get_admin_options)) // 権限チェックのためPOSTにします
         .route("/admin/trips", post(create_trip))
         .layer(cors)
-        .with_state(pool);
+        .with_state(pool.clone());
+
+    let cron_pool = pool.clone();
+    tokio::spawn(async move {
+        run_cron_job(cron_pool).await;
+    });
 
     // サーバー起動
     let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
@@ -538,7 +544,18 @@ async fn insert_status(
             match result {
                 Ok(_) => {
                     println!("✅ 状況更新成功: {}", payload.status);
-                    send_teams_notification(&pool, payload.trip_id, &payload.status, &payload.description).await;
+
+                    // 通知処理を別スレッド(spawn)に投げることで、APIレスポンスを待たせない
+                    // poolや文字列をmoveで渡すためにcloneする
+                    let pool_clone = pool.clone();
+                    let trip_id = payload.trip_id;
+                    let status = payload.status.clone();
+                    let description = payload.description.clone();
+
+                    tokio::spawn(async move {
+                        send_teams_notification(&pool_clone, trip_id, &status, &description).await;
+                    });
+
                     Ok(format!("運行状況を '{}' に変更しました", payload.status))
                 }
                 Err(e) => {
@@ -553,6 +570,116 @@ async fn insert_status(
     }
 }
 
+
+// マスタデータ一括取得 (POST /admin/options)
+#[derive(Deserialize)]
+struct AdminAuthRequest {
+    user_id: uuid::Uuid,
+}
+
+async fn get_admin_options(
+    State(pool): State<PgPool>,
+    Json(payload): Json<AdminAuthRequest>,
+) -> Result<Json<AdminOptionsResponse>, StatusCode> {
+    // 権限チェック
+    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
+        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // roleが取れない、またはadminでない場合はエラー
+    match user {
+        Some(u) if u.role == "admin" => {},
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    // ルート一覧取得 (品川->荒川 のように名前を結合)
+    let routes = sqlx::query!(
+        r#"
+        SELECT
+            r.route_id,
+            s.name as "source!",
+            d.name as "dest!"
+        FROM routes r
+        JOIN bus_stops s ON r.source_bus_stop_id = s.bus_stop_id
+        JOIN bus_stops d ON r.destination_bus_stop_id = d.bus_stop_id
+        "#
+    )
+    .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // 車両一覧取得
+    let vehicles = sqlx::query!("SELECT vehicle_id, vehicle_name FROM vehicles")
+        .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // 運転手一覧取得
+    let drivers = sqlx::query!("SELECT driver_id, name FROM drivers")
+        .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // レスポンス作成
+    Ok(Json(AdminOptionsResponse {
+        routes: routes.into_iter().map(|r| RouteOption {
+            route_id: r.route_id,
+            name: format!("{} → {}", r.source, r.dest),
+        }).collect(),
+        vehicles: vehicles.into_iter().map(|v| SimpleOption {
+            id: v.vehicle_id,
+            name: v.vehicle_name,
+        }).collect(),
+        drivers: drivers.into_iter().map(|d| SimpleOption {
+            id: d.driver_id,
+            name: d.name,
+        }).collect(),
+    }))
+}
+
+
+// 便の新規作成 (POST /admin/trips)
+async fn create_trip(
+    State(pool): State<PgPool>,
+    Json(payload): Json<CreateTripRequest>,
+) -> Result<String, StatusCode> {
+    println!("【管理者】新規便作成リクエスト");
+
+    // 権限チェック
+    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
+        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match user {
+        Some(u) if u.role == "admin" => {},
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    // tripsテーブルにINSERT
+    // trip_date は departure_datetime の日付部分を自動で採用します
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO trips (route_id, vehicle_id, driver_id, trip_date, departure_datetime, arrival_datetime)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+        payload.route_id,
+        payload.vehicle_id,
+        payload.driver_id,
+        payload.departure_datetime.date(), // $4: 日付だけを取り出して渡す (NaiveDate)
+        payload.departure_datetime,        // $5: 日時そのまま (NaiveDateTime)
+        payload.arrival_datetime           // $6: 日時そのまま
+    )
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            println!("便作成成功");
+            Ok("新しい便を作成しました".to_string())
+        }
+        Err(e) => {
+            println!("DBエラー: {:?}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+
+// ----------------------------------------------------------------
+// 通知タスク
+// ----------------------------------------------------------------
 
 
 // Teams通知機能
@@ -721,107 +848,157 @@ async fn send_teams_notification(
 }
 
 
-// マスタデータ一括取得 (POST /admin/options)
-#[derive(Deserialize)]
-struct AdminAuthRequest {
-    user_id: uuid::Uuid,
-}
-
-async fn get_admin_options(
-    State(pool): State<PgPool>,
-    Json(payload): Json<AdminAuthRequest>,
-) -> Result<Json<AdminOptionsResponse>, StatusCode> {
-    // 権限チェック
-    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
-        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // roleが取れない、またはadminでない場合はエラー
-    match user {
-        Some(u) if u.role == "admin" => {},
-        _ => return Err(StatusCode::FORBIDDEN),
+// リマインド通知送信関数（自動実行用）
+async fn send_reminder_notification(pool: &PgPool, trip_id: uuid::Uuid) -> bool {
+    // 便情報の取得
+    struct TripData {
+        source: String,
+        destination: String,
+        departure_time: NaiveDateTime,
+        vehicle_name: String,
     }
-
-    // ルート一覧取得 (品川->荒川 のように名前を結合)
-    let routes = sqlx::query!(
+    let trip = match sqlx::query_as!(
+        TripData,
         r#"
         SELECT
-            r.route_id,
-            s.name as "source!",
-            d.name as "dest!"
-        FROM routes r
+            s.name as "source!", d.name as "destination!",
+            t.departure_datetime as departure_time, v.vehicle_name as "vehicle_name!"
+        FROM trips t
+        JOIN routes r ON t.route_id = r.route_id
         JOIN bus_stops s ON r.source_bus_stop_id = s.bus_stop_id
         JOIN bus_stops d ON r.destination_bus_stop_id = d.bus_stop_id
-        "#
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        WHERE t.trip_id = $1
+        "#,
+        trip_id
     )
-    .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .fetch_optional(pool).await.unwrap_or(None) {
+        Some(t) => t,
+        None => return false, // 便がない
+    };
 
-    // 車両一覧取得
-    let vehicles = sqlx::query!("SELECT vehicle_id, vehicle_name FROM vehicles")
-        .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // 予約者の取得（重複除外）
+    struct UserData { name: String, email: String }
+    let users = sqlx::query_as!(
+        UserData,
+        r#"
+        SELECT DISTINCT u.name, u.email
+        FROM reservations r
+        JOIN users u ON r.user_id = u.user_id
+        WHERE r.trip_id = $1
+        "#,
+        trip_id
+    )
+    .fetch_all(pool).await.unwrap_or_default();
 
-    // 運転手一覧取得
-    let drivers = sqlx::query!("SELECT driver_id, name FROM drivers")
-        .fetch_all(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // レスポンス作成
-    Ok(Json(AdminOptionsResponse {
-        routes: routes.into_iter().map(|r| RouteOption {
-            route_id: r.route_id,
-            name: format!("{} → {}", r.source, r.dest),
-        }).collect(),
-        vehicles: vehicles.into_iter().map(|v| SimpleOption {
-            id: v.vehicle_id,
-            name: v.vehicle_name,
-        }).collect(),
-        drivers: drivers.into_iter().map(|d| SimpleOption {
-            id: d.driver_id,
-            name: d.name,
-        }).collect(),
-    }))
-}
-
-
-// 便の新規作成 (POST /admin/trips)
-async fn create_trip(
-    State(pool): State<PgPool>,
-    Json(payload): Json<CreateTripRequest>,
-) -> Result<String, StatusCode> {
-    println!("【管理者】新規便作成リクエスト");
-
-    // 権限チェック
-    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
-        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match user {
-        Some(u) if u.role == "admin" => {},
-        _ => return Err(StatusCode::FORBIDDEN),
+    // 予約者がいない場合は false を返す
+    if users.is_empty() {
+        println!("まだ予約者がいないため、リマインド通知を保留します: {}", trip.departure_time);
+        return false;
     }
 
-    // tripsテーブルにINSERT
-    // trip_date は departure_datetime の日付部分を自動で採用します
-    let result = sqlx::query!(
-        r#"
-        INSERT INTO trips (route_id, vehicle_id, driver_id, trip_date, departure_datetime, arrival_datetime)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        "#,
-        payload.route_id,
-        payload.vehicle_id,
-        payload.driver_id,
-        payload.departure_datetime.date(), // $4: 日付だけを取り出して渡す (NaiveDate)
-        payload.departure_datetime,        // $5: 日時そのまま (NaiveDateTime)
-        payload.arrival_datetime           // $6: 日時そのまま
-    )
-    .execute(&pool)
-    .await;
+    // メンション作成
+    let mut mention_text_parts = Vec::new();
+    let mut mention_entities = Vec::new();
+    for user in users {
+        let text_tag = format!("<at>{}</at>", user.name);
+        mention_text_parts.push(format!("{} 様", text_tag));
+        mention_entities.push(serde_json::json!({
+            "type": "mention", "text": text_tag,
+            "mentioned": { "id": user.email, "name": user.name }
+        }));
+    }
 
-    match result {
-        Ok(_) => {
-            println!("便作成成功");
-            Ok("新しい便を作成しました".to_string())
-        }
-        Err(e) => {
-            println!("DBエラー: {:?}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+    //  通知JSON作成
+    let webhook_url = std::env::var("TEAMS_WEBHOOK_URL").unwrap_or_default();
+    if webhook_url.is_empty() { return false; }
+
+    let payload = serde_json::json!({
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "type": "AdaptiveCard",
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "version": "1.2",
+                "body": [
+                    {
+                        "type": "TextBlock",
+                        "size": "Medium",
+                        "weight": "Bolder",
+                        "text": "⏰ まもなく出発時刻です",
+                        "color": "Accent"
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "ご予約のバスが**2時間以内**に出発します。乗り遅れのないようご注意ください。",
+                        "wrap": true
+                    },
+                    {
+                        "type": "FactSet",
+                        "facts": [
+                            { "title": "出発時刻:", "value": trip.departure_time.format("%H:%M").to_string() },
+                            { "title": "区間:", "value": format!("{} → {}", trip.source, trip.destination) },
+                            { "title": "車両:", "value": trip.vehicle_name }
+                        ]
+                    },
+                    { "type": "TextBlock", "text": mention_text_parts.join("　"), "wrap": true }
+                ],
+                "msteams": { "entities": mention_entities }
+            }
+        }]
+    });
+
+    // 送信
+    let _ = reqwest::Client::new().post(&webhook_url).json(&payload).send().await;
+    println!("✅ リマインド通知送信完了: {}", trip.departure_time);
+
+    true // 送信したので true
+}
+
+// ----------------------------------------------------------------
+// 定期実行タスク (Cron Job)
+// ----------------------------------------------------------------
+async fn run_cron_job(pool: PgPool) {
+    let mut interval = time::interval(Duration::from_secs(60));
+
+    loop {
+        interval.tick().await;
+
+        let now = Local::now().naive_local();
+        println!("🔍 [TimeCheck] アプリ現在時刻(JST): {}", now);
+
+        let trips = sqlx::query!(
+            r#"
+            SELECT trip_id
+            FROM trips
+            WHERE departure_datetime > $1
+              AND departure_datetime <= $1 + INTERVAL '2 hours'
+              AND notification_sent = FALSE
+            "#,
+            now
+        )
+        .fetch_all(&pool)
+        .await;
+
+        if let Ok(trip_rows) = trips {
+            for row in trip_rows {
+                println!("🚀 リマインド対象発見: {}", row.trip_id);
+
+                // A. 通知を送ってみる
+                // ★修正: 戻り値(sent)を受け取る
+                let sent = send_reminder_notification(&pool, row.trip_id).await;
+
+                // B. 送信できた場合のみ「通知済み」マークをつける
+                if sent {
+                    let _ = sqlx::query!(
+                        "UPDATE trips SET notification_sent = TRUE WHERE trip_id = $1",
+                        row.trip_id
+                    )
+                    .execute(&pool)
+                    .await;
+                }
+            }
         }
     }
 }
