@@ -528,16 +528,55 @@ async fn send_teams_notification(
     status: &str,
     description: &Option<String>,
 ) {
-    // 1. 環境変数からURLを取得
     let webhook_url = match std::env::var("TEAMS_WEBHOOK_URL") {
         Ok(url) => url,
         Err(_) => {
-            println!("⚠️ TEAMS_WEBHOOK_URLが設定されていないため通知をスキップします");
+            println!("TEAMS_WEBHOOK_URLが設定されていないため通知をスキップします");
             return;
         }
     };
 
-    // 2. その便を予約しているユーザー(メールと名前)を取得
+    struct TripInfo {
+        source: String,
+        destination: String,
+        departure_time: NaiveDateTime,
+        vehicle_name: String,
+    }
+
+    // 便の詳細情報を取得
+    let trip_info = sqlx::query_as!(
+        TripInfo,
+        r#"
+        SELECT
+            s.name as "source!",
+            d.name as "destination!",
+            t.departure_datetime as departure_time,
+            v.vehicle_name as "vehicle_name!"
+        FROM trips t
+        JOIN routes r ON t.route_id = r.route_id
+        JOIN bus_stops s ON r.source_bus_stop_id = s.bus_stop_id
+        JOIN bus_stops d ON r.destination_bus_stop_id = d.bus_stop_id
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        WHERE t.trip_id = $1
+        "#,
+        trip_id
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    let trip_details_text = match trip_info {
+        Some(info) => format!(
+            "{} {}発\n{} → {}",
+            info.departure_time.format("%m/%d %H:%M"),
+            info.vehicle_name,
+            info.source,
+            info.destination
+        ),
+        None => "便情報の取得に失敗しました".to_string(),
+    };
+
+    // 予約者の取得
     struct UserInfo { name: String, email: String }
     let users = sqlx::query_as!(
         UserInfo,
@@ -551,45 +590,45 @@ async fn send_teams_notification(
     )
     .fetch_all(pool)
     .await
-    .unwrap_or_default(); // エラーなら空リスト
+    .unwrap_or_default();
 
     if users.is_empty() {
-        println!("ℹ️ 予約者がいないため通知しません");
+        println!("予約者がいないため通知しません");
         return;
     }
 
-    // 3. メンション用のデータを作る
-    // Teamsのメンションには "<at>名前</at>" というテキストと、
-    // それに対応する "mentioned": { "id": "email", ... } というデータが必要です。
-
+    // メンションデータの作成
     let mut mention_text_parts = Vec::new();
     let mut mention_entities = Vec::new();
 
     for user in users {
-        // テキスト部分: <at>高専太郎</at>
         let text_tag = format!("<at>{}</at>", user.name);
-        mention_text_parts.push(text_tag.clone());
+        let display_text = format!("{} 様", text_tag);
 
-        // データ部分
+        mention_text_parts.push(display_text);
+
         mention_entities.push(serde_json::json!({
             "type": "mention",
             "text": text_tag,
             "mentioned": {
-                "id": user.email, // ここがTeamsの登録メアドと一致していれば通知が飛ぶ
+                "id": user.email,
                 "name": user.name
             }
         }));
     }
 
-    let all_mentions_str = mention_text_parts.join(" ");
-    let status_msg = match status {
-        "delayed" => "⚠️ 【遅延情報】",
-        "cancelled" => "kB 【運休情報】", // kBは赤いアイコンっぽいやつ
-        _ => "【運行情報】"
+    let all_mentions_str = mention_text_parts.join("　");
+
+    // 表示テキストの整備
+    let (status_title, status_color, status_text_jp) = match status {
+        "delayed" => ("⚠️ 【遅延情報】", "Warning", "遅延"),
+        "cancelled" => ("🚫 【運休情報】", "Attention", "運休"),
+        _ => ("【運行情報】", "Accent", "変更"),
     };
+
     let desc_str = description.clone().unwrap_or("詳細は管理画面を確認してください".to_string());
 
-    // 4. Adaptive Card の JSON を組み立てる
+    // Adaptive Card JSON
     let payload = serde_json::json!({
         "type": "message",
         "attachments": [
@@ -602,17 +641,18 @@ async fn send_teams_notification(
                             "type": "TextBlock",
                             "size": "Medium",
                             "weight": "Bolder",
-                            "text": format!("{} 産技往復便のお知らせ", status_msg),
-                            "color": if status == "cancelled" { "Attention" } else { "Warning" }
+                            "text": format!("{} 産技往復便のお知らせ", status_title),
+                            "color": status_color
                         },
                         {
                             "type": "TextBlock",
-                            "text": format!("以下の便の運行状況が **{}** に変更されました。", status.to_uppercase()),
+                            "text": format!("以下の便の運行状況が **{}** に変更されました。", status_text_jp),
                             "wrap": true
                         },
                         {
                             "type": "FactSet",
                             "facts": [
+                                { "title": "対象便:", "value": trip_details_text },
                                 { "title": "詳細:", "value": desc_str }
                             ]
                         },
@@ -624,24 +664,24 @@ async fn send_teams_notification(
                         },
                         {
                             "type": "TextBlock",
-                            "text": all_mentions_str, // ここに <at>...が入る
+                            "text": all_mentions_str,
                             "wrap": true
                         }
                     ],
                     "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                     "version": "1.2",
                     "msteams": {
-                        "entities": mention_entities // ここに実データが入る
+                        "entities": mention_entities
                     }
                 }
             }
         ]
     });
 
-    // 5. 送信
+    // 送信
     let client = reqwest::Client::new();
     match client.post(&webhook_url).json(&payload).send().await {
-        Ok(_) => println!("✅ Teams通知送信成功"),
-        Err(e) => println!("❌ Teams通知送信失敗: {:?}", e),
+        Ok(_) => println!("Teams通知送信成功"),
+        Err(e) => println!("Teams通知送信失敗: {:?}", e),
     }
 }
