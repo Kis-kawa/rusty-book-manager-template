@@ -72,6 +72,20 @@ export default function Home() {
   const [userName, setUserName] = useState<string | null>(null);
   const [trips, setTrips] = useState<Trip[]>([]); // 運行便のリスト
   const [isLoading, setIsLoading] = useState(true);
+  const [isMaintenance, setIsMaintenance] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetch("http://localhost:8000/admin/maintenance")
+      .then((res) => res.json())
+      .then((data) => setIsMaintenance(data))
+      .catch((e) => {
+        console.error("Status check failed", e);
+        // 通信エラー時はとりあえず通常表示にするか、エラー表示にするか
+        // ここでは通常表示(false)にしておく
+        setIsMaintenance(false);
+      });
+  }, []);
+
 
 	// 画面が表示されたら
   useEffect(() => {
@@ -101,6 +115,35 @@ export default function Home() {
 
     fetchTrips();
   }, []);
+
+  if (isMaintenance) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center text-white p-4">
+        <div className="bg-gray-900 border border-red-800 p-8 rounded-xl shadow-2xl max-w-md w-full text-center space-y-6">
+          <div className="flex justify-center">
+            <div className="bg-red-900/30 p-4 rounded-full">
+              <h1 className="text-3xl font-bold text-red-500">
+                メンテナンス中！！！
+              </h1>
+            </div>
+          </div>
+
+          <h1 className="text-3xl font-bold text-red-500">
+            ただいまメンテナンス中です
+          </h1>
+
+          <p className="text-gray-300 leading-relaxed">
+            現在、システムの点検・改修を行っております。<br />
+            ご不便をおかけしますが、再開までしばらくお待ちください。
+          </p>
+
+          <div className="pt-4 text-sm text-gray-500">
+            System Maintenance Mode
+          </div>
+        </div>
+      </div>
+    );
+  }
 
 return (
     // 全体を縦並びのフレックスボックスに、min-h-screenにしてスクロール可能に

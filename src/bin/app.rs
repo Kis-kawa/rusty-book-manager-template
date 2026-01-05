@@ -1,9 +1,5 @@
 use axum::{
-    routing::{get, post},
-    Router,
-    Json,
-    extract::State,
-    http::{Method, StatusCode},
+    Json, Router, extract::{Path, State}, http::{Method, StatusCode}, routing::{delete, get, post}
 };
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -51,6 +47,8 @@ async fn main() {
         .route("/admin/status", post(insert_status))
         .route("/admin/options", post(get_admin_options)) // 権限チェックのためPOSTにします
         .route("/admin/trips", post(create_trip))
+        .route("/admin/reservations/:reservation_id", delete(admin_delete_reservation))
+        .route("/admin/maintenance", get(get_maintenance_status).post(set_maintenance_status))
         .layer(cors)
         .with_state(pool.clone());
 
@@ -315,8 +313,43 @@ async fn get_all_trips(
 async fn create_reservation(
     State(pool): State<PgPool>,
     Json(payload): Json<CreateReservationRequest>,
-) -> Result<String, StatusCode> {
+) -> Result<(StatusCode, String), StatusCode> {
     println!("【予約】Trip: {}, User: {}", payload.trip_id, payload.user_id);
+
+    if is_maintenance_mode(&pool).await {
+        println!("⛔️ メンテナンス中のため予約を拒否しました");
+        // 503 Service Unavailable を返す
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // status が 'cancelled' なら予約させない
+    let trip = sqlx::query!(
+        r#"
+        SELECT
+            t.departure_datetime,
+            os.status as "status?: String" -- LEFT JOINなのでNULLの可能性あり
+        FROM trips t
+        LEFT JOIN operational_statuses os ON t.trip_id = os.trip_id
+        WHERE t.trip_id = $1
+        "#,
+        payload.trip_id
+    )
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let trip = match trip {
+        Some(t) => {
+            // ★追加: 運休チェック
+            if let Some(ref status) = t.status {
+                if status == "cancelled" {
+                    return Err(StatusCode::SERVICE_UNAVAILABLE); // 503エラーを返す
+                }
+            }
+            t
+        },
+        None => return Err(StatusCode::NOT_FOUND),
+    };
 
     // trips -> vehicles -> vehicle_types と辿って total_seats、車両の定員を取ってくる
     let capacity = sqlx::query!(
@@ -375,9 +408,30 @@ async fn create_reservation(
     .await;
 
     match result {
-        Ok(_rec) => {
-            println!("予約完了! Seat: {} / Capacity: {}", next_seat, capacity);
-            Ok(format!("予約が完了しました！ {}人目 (定員: {}名)", next_seat, capacity))
+        Ok(_) => {
+            println!("✅ 予約作成成功");
+
+            // 駆け込み予約チェック
+            // 出発まで2時間を切っているかチェックする
+            let now = Local::now().naive_local();
+            // trip.departure_datetime と現在の差分を計算
+            let duration_until_departure = trip.departure_datetime - now;
+
+            // 「未来の出発」かつ「2時間(120分)以内」なら即時通知
+            if duration_until_departure.num_seconds() > 0 && duration_until_departure.num_minutes() <= 120 {
+                println!("🏃💨 出発2時間以内の駆け込み予約を検知！リマインドを送ります。");
+
+                let pool_clone = pool.clone();
+                let trip_id = payload.trip_id;
+                let user_id = payload.user_id;
+
+                // 別スレッドで通知を送る
+                tokio::spawn(async move {
+                    send_personal_reminder(&pool_clone, trip_id, user_id).await;
+                });
+            }
+
+            Ok((StatusCode::CREATED, "予約しました".to_string()))
         }
         Err(e) => {
             println!("予約失敗: {:?}", e);
@@ -1001,4 +1055,158 @@ async fn run_cron_job(pool: PgPool) {
             }
         }
     }
+}
+
+// 管理者用：予約強制削除 (DELETE /admin/reservations/:id)
+async fn admin_delete_reservation(
+    State(pool): State<PgPool>,
+    Path(reservation_id): Path<uuid::Uuid>,
+    // ヘッダーなどで管理者権限チェックをするのが理想ですが、今回は簡易的に
+) -> Result<String, StatusCode> {
+
+    let result = sqlx::query!(
+        "DELETE FROM reservations WHERE reservation_id = $1",
+        reservation_id
+    )
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() > 0 {
+                Ok("予約を強制キャンセルしました".to_string())
+            } else {
+                Err(StatusCode::NOT_FOUND)
+            }
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+
+// 個人宛リマインド通知（駆け込み予約用）
+async fn send_personal_reminder(pool: &PgPool, trip_id: uuid::Uuid, user_id: uuid::Uuid) {
+    // 1. 便情報の取得
+    struct TripData {
+        source: String, destination: String,
+        departure_time: NaiveDateTime, vehicle_name: String,
+    }
+    let trip = match sqlx::query_as!(
+        TripData,
+        r#"
+        SELECT s.name as "source!", d.name as "destination!",
+               t.departure_datetime as departure_time, v.vehicle_name as "vehicle_name!"
+        FROM trips t
+        JOIN routes r ON t.route_id = r.route_id
+        JOIN bus_stops s ON r.source_bus_stop_id = s.bus_stop_id
+        JOIN bus_stops d ON r.destination_bus_stop_id = d.bus_stop_id
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        WHERE t.trip_id = $1
+        "#,
+        trip_id
+    ).fetch_optional(pool).await.unwrap_or(None) {
+        Some(t) => t, None => return,
+    };
+
+    // 2. ユーザー情報の取得（対象の1名だけ）
+    let user = match sqlx::query!(
+        "SELECT name, email FROM users WHERE user_id = $1",
+        user_id
+    ).fetch_optional(pool).await.unwrap_or(None) {
+        Some(u) => u, None => return,
+    };
+
+    // 3. Teams通知の作成 (メンション付き)
+    let webhook_url = std::env::var("TEAMS_WEBHOOK_URL").unwrap_or_default();
+    if webhook_url.is_empty() { return; }
+
+    let text_tag = format!("<at>{}</at>", user.name);
+
+    let payload = serde_json::json!({
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "version": "1.2",
+                "body": [
+                    { "type": "TextBlock", "size": "Medium", "weight": "Bolder", "text": "⏰ 出発直前のご予約です", "color": "Attention" },
+                    { "type": "TextBlock", "text": "ご予約ありがとうございます。バスは**まもなく出発**します。", "wrap": true },
+                    { "type": "FactSet", "facts": [
+                        { "title": "出発時刻:", "value": trip.departure_time.format("%H:%M").to_string() },
+                        { "title": "区間:", "value": format!("{} → {}", trip.source, trip.destination) },
+                        { "title": "車両:", "value": trip.vehicle_name }
+                    ]},
+                    { "type": "TextBlock", "text": format!("{} 様", text_tag), "wrap": true }
+                ],
+                "msteams": { "entities": [{
+                    "type": "mention", "text": text_tag,
+                    "mentioned": { "id": user.email, "name": user.name }
+                }]}
+            }
+        }]
+    });
+
+    // 4. 送信 (エラーハンドリングはログ出力のみ)
+    let _ = reqwest::Client::new().post(&webhook_url).json(&payload).send().await;
+    println!("⚡️ 駆け込み予約リマインド送信: {}", user.name);
+}
+
+
+
+// ----------------------------------------------------------------
+// メンテナンスモード関連
+// ----------------------------------------------------------------
+
+// ヘルパー: 現在メンテナンス中かどうかDBを見る
+async fn is_maintenance_mode(pool: &PgPool) -> bool {
+    let row = sqlx::query!("SELECT value FROM app_settings WHERE key = 'maintenance_mode'")
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+    if let Some(r) = row {
+        r.value == "true"
+    } else {
+        false
+    }
+}
+
+// API: メンテナンスモードの状態を取得 (GET /admin/maintenance)
+async fn get_maintenance_status(State(pool): State<PgPool>) -> Result<Json<bool>, StatusCode> {
+    let mode = is_maintenance_mode(&pool).await;
+    Ok(Json(mode))
+}
+
+// API: メンテナンスモードの切り替え (POST /admin/maintenance)
+#[derive(Deserialize)]
+struct MaintenanceRequest {
+    enabled: bool,
+    user_id: uuid::Uuid, // 管理者チェック用
+}
+
+async fn set_maintenance_status(
+    State(pool): State<PgPool>,
+    Json(payload): Json<MaintenanceRequest>,
+) -> Result<String, StatusCode> {
+    // 1. 管理者権限チェック
+    let user = sqlx::query!("SELECT role as \"role!: String\" FROM users WHERE user_id = $1", payload.user_id)
+        .fetch_optional(&pool).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match user {
+        Some(u) if u.role == "admin" => {},
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+
+    // 2. 設定更新
+    let val_str = if payload.enabled { "true" } else { "false" };
+    sqlx::query!(
+        "UPDATE app_settings SET value = $1 WHERE key = 'maintenance_mode'",
+        val_str
+    )
+    .execute(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    println!("🔧 メンテナンスモードを {} に変更しました", val_str);
+    Ok("設定を変更しました".to_string())
 }

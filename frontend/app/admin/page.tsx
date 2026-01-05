@@ -73,6 +73,43 @@ useEffect(() => { loadData(); }, [router]);
 // 更新後にリストを再読み込みする関数を子コンポーネントに渡す
 const handleReload = () => loadData();
 
+
+// AdminPage コンポーネント内
+const [isMaintenance, setIsMaintenance] = useState(false);
+
+// 初回ロード時に今の状態を取得
+useEffect(() => {
+  fetch("http://localhost:8000/admin/maintenance")
+    .then(res => res.json())
+    .then(data => setIsMaintenance(data))
+    .catch(console.error);
+}, []);
+
+// 切り替え処理
+const toggleMaintenance = async () => {
+    if (!user) return;
+    const newState = !isMaintenance;
+
+    if (!confirm(`メンテナンスモードを ${newState ? "ON" : "OFF"} にしますか？\nONにすると新規予約ができなくなります。`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch("http://localhost:8000/admin/maintenance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: newState, user_id: user.user_id }),
+        });
+        if (res.ok) {
+        setIsMaintenance(newState);
+        alert(`メンテナンスモードを ${newState ? "開始" : "解除"} しました`);
+        }
+    } catch (e) {
+        alert("通信エラー");
+    }
+};
+
+
 return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
     <div className="flex justify-between items-center mb-8">
@@ -80,6 +117,13 @@ return (
         <h1 className="text-3xl font-bold text-red-500">運行管理システム (Admin)</h1>
         <AddTripDialog user={user} onCreated={loadData} />
         </div>
+        <Button
+            onClick={toggleMaintenance}
+            variant={isMaintenance ? "destructive" : "outline"}
+            className="border-red-500"
+        >
+            {isMaintenance ? "⛔️ メンテナンス中 (解除する)" : "🔧 メンテナンス開始"}
+        </Button>
         <Button variant="secondary" asChild><Link href="/">利用者画面へ戻る</Link></Button>
     </div>
 
