@@ -73,6 +73,7 @@ export default function Home() {
   const [trips, setTrips] = useState<Trip[]>([]); // 運行便のリスト
   const [isLoading, setIsLoading] = useState(true);
   const [isMaintenance, setIsMaintenance] = useState<boolean | null>(null);
+  const [showPast, setShowPast] = useState(false); // 過去便の表示スイッチ
 
   useEffect(() => {
     fetch("http://localhost:8000/admin/maintenance")
@@ -145,6 +146,15 @@ export default function Home() {
     );
   }
 
+  const now = new Date();
+
+  const visibleTrips = trips.filter((trip) => {
+    // スイッチがONなら全部見せる
+    if (showPast) return true;
+
+    // スイッチOFFなら、到着時刻が「未来」のものだけ残す
+    return new Date(trip.arrival_time) > now;
+  });
 return (
     // 全体を縦並びのフレックスボックスに、min-h-screenにしてスクロール可能に
     <div className="flex flex-col min-h-screen w-full bg-gray-50">
@@ -196,47 +206,75 @@ return (
         {isLoading ? (
           <p>読み込み中...</p>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {trips.map((trip) => (
-              <Card key={trip.trip_id} className="hover:shadow-lg transition-shadow border-l-4 border-l-blue-500">
-                <CardHeader className="pb-2">
-                  <div className="flex justify-between items-start">
-                    <div className="text-sm font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded">
-                      {trip.vehicle_name}
-                    </div>
-                    {trip.status === "scheduled" && (
-                      <span className="text-xs text-green-600 border border-green-200 px-2 py-1 rounded-full bg-green-50">
-                        運行予定
-                      </span>
-                    )}
-                  </div>
-                  <CardTitle className="text-xl mt-2 flex items-center gap-2">
-                    {trip.source}
-                    <span className="text-gray-400">→</span>
-                    {trip.destination}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex flex-col gap-2 mt-2">
-                    <div className="flex justify-between items-center border-b pb-2">
-                      <span className="text-gray-500 text-sm">出発</span>
-                      <span className="font-bold text-lg">{formatDate(trip.departure_time)}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-gray-500 text-sm">到着</span>
-                      <span className="font-bold ">{formatDate(trip.arrival_time)}</span>
-                    </div>
+          <div className="max-w-6xl mx-auto space-y-6">
 
-                    <Button
-                      className="w-full mt-4 bg-blue-600 hover:bg-blue-700"
-                      onClick={() => handleReserve(trip.trip_id)}
-                    >
-                      予約する
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+            {/* ★表示切り替えスイッチエリア */}
+            <div className="flex justify-end items-center gap-2 mb-4">
+              <input
+                type="checkbox"
+                id="showPast"
+                checked={showPast}
+                onChange={(e) => setShowPast(e.target.checked)}
+                className="w-4 h-4 cursor-pointer"
+              />
+              <label htmlFor="showPast" className="cursor-pointer text-gray-400 hover:text-white select-none">
+                終了した便も表示する
+              </label>
+            </div>
+
+            {/* ★リスト表示エリア */}
+            {visibleTrips.length === 0 ? (
+              <p className="text-gray-500 text-center py-8">
+                表示できる運行便がありません
+              </p>
+            ) : (
+              // ここで元のグリッドレイアウト(grid-cols-3)を使います
+              // ループさせるのは trips ではなく visibleTrips です
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {visibleTrips.map((trip) => (
+                  <Card key={trip.trip_id} className="hover:shadow-lg transition-shadow border-l-4 border-l-blue-500">
+                    <CardHeader className="pb-2">
+                      <div className="flex justify-between items-start">
+                        <div className="text-sm font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded">
+                          {trip.vehicle_name}
+                        </div>
+                        {/* statusがある場合のみ表示 (scheduledなど) */}
+                        {trip.status === "scheduled" && (
+                          <span className="text-xs text-green-600 border border-green-200 px-2 py-1 rounded-full bg-green-50">
+                            運行予定
+                          </span>
+                        )}
+                      </div>
+                      <CardTitle className="text-xl mt-2 flex items-center gap-2">
+                        {trip.source}
+                        <span className="text-gray-400">→</span>
+                        {trip.destination}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="flex flex-col gap-2 mt-2">
+                        <div className="flex justify-between items-center border-b pb-2">
+                          <span className="text-gray-500 text-sm">出発</span>
+                          {/* formatDate関数がある前提です */}
+                          <span className="font-bold text-lg">{new Date(trip.departure_time).toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-gray-500 text-sm">到着</span>
+                          <span className="font-bold ">{new Date(trip.arrival_time).toLocaleString()}</span>
+                        </div>
+
+                        <Button
+                          className="w-full mt-4 bg-blue-600 hover:bg-blue-700"
+                          onClick={() => handleReserve(trip.trip_id)} // 予約処理(関数名は適宜合わせてください)
+                        >
+                          予約する
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -813,7 +813,7 @@ async fn send_teams_notification(
     let users = sqlx::query_as!(
         UserInfo,
         r#"
-        SELECT u.name, u.email
+        SELECT DISTINCT u.name, u.email
         FROM reservations r
         JOIN users u ON r.user_id = u.user_id
         WHERE r.trip_id = $1
