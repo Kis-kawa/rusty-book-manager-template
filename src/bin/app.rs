@@ -599,15 +599,32 @@ async fn insert_status(
                 Ok(_) => {
                     println!("✅ 状況更新成功: {}", payload.status);
 
-                    // 通知処理を別スレッド(spawn)に投げることで、APIレスポンスを待たせない
-                    // poolや文字列をmoveで渡すためにcloneする
+                    // 非同期で通知 ＆ キャンセル処理
                     let pool_clone = pool.clone();
                     let trip_id = payload.trip_id;
-                    let status = payload.status.clone();
+                    let status = payload.status.clone(); // "cancelled" かどうか判定に使う
                     let description = payload.description.clone();
 
                     tokio::spawn(async move {
+                        // 1. まず通知を送る（この時点ではまだ予約データが必要！）
                         send_teams_notification(&pool_clone, trip_id, &status, &description).await;
+
+                        // 2. 「運休」の場合のみ、通知後に予約を全削除する
+                        if status == "cancelled" {
+                            println!("🗑️ 運休のため予約データを削除します: {}", trip_id);
+
+                            let delete_result = sqlx::query!(
+                                "DELETE FROM reservations WHERE trip_id = $1",
+                                trip_id
+                            )
+                            .execute(&pool_clone)
+                            .await;
+
+                            match delete_result {
+                                Ok(res) => println!("✅ 予約削除完了: {}件", res.rows_affected()),
+                                Err(e) => println!("❌ 予約削除失敗: {:?}", e),
+                            }
+                        }
                     });
 
                     Ok(format!("運行状況を '{}' に変更しました", payload.status))
