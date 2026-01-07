@@ -25,3 +25,18 @@
 - .github: GitHub Actions の設定ファイルが主に含まれています。
 - infra: AWS 上にリソースを構築し、デプロイやリリースを一通り体験したい場合に必要です。セットアップの方法については、[README](./infra/README.md)に記載しています。
 - frontend: rust-book-manager の UI を立ち上げたい場合に必要です。立ち上げる方法は、[README](./frontend/README.md)に記載しています。
+
+以下追記
+
+## 使い方
+
+1. frontの起動
+/frontendでnpm run dev
+
+2. dockerとプログラムを動かす
+cargo make run
+
+3. DBを入れる
+cargo make migrate
+
+4. localhostでサービスを使用する
